@@ -1,0 +1,263 @@
+services:
+  ##########################################################
+  # 🪣 MINIO — Object Storage (Data Lake)
+##########################################################
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web Console
+    volumes:
+      - ./data/minio:/data
+    restart: unless-stopped
+    networks:
+      - data-platform
+################################################
+  nifi:
+    image: apache/nifi:1.27.0
+    container_name: nifi
+    environment:
+      NIFI_WEB_HTTP_PORT: 8080
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: admin123
+    volumes:
+      - ~/nifi-data/incoming:/opt/nifi/incoming
+      - ~/nifi-output:/opt/nifi/output
+      - ~/nifi-conf:/opt/nifi/nifi-current/conf
+      - ./nifi-conf-restore:/opt/nifi/nifi-current/conf
+      - ~/nifi-state:/opt/nifi/nifi-current/state
+      - ~/nifi-database:/opt/nifi/nifi-current/database_repository
+      - ~/nifi-flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - ~/nifi-content:/opt/nifi/nifi-current/content_repository
+      - ~/nifi-provenance:/opt/nifi/nifi-current/provenance_repository
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - data-platform
+##########################################################
+  # 📘 JUPYTER + PYSPARK — Exploration and Processing
+  ##########################################################
+  jupyter:
+    image: jupyter/pyspark-notebook:latest
+    container_name: jupyter
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_TOKEN: "retail"
+      SPARK_DRIVER_HOST: "jupyter"
+      SPARK_CONF_DIR: /home/jovyan/spark-conf
+      PYSPARK_SUBMIT_ARGS: "--jars /home/jovyan/spark-jars/*.jar --conf spark.driver.extraClassPath=/home/jovyan/spark-jars/* --conf spark.executor.extraClassPath=/home/jovyan/spark-jars/* pyspark-shell"
+    command: start-notebook.sh --NotebookApp.token='retail'
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data
+      - ./shared:/home/jovyan/shared
+      - ./data:/opt/spark-data
+      - ./spark-conf:/home/jovyan/spark-conf
+      - ./spark-jars:/home/jovyan/spark-jars
+
+    depends_on:
+      - minio
+      - nessie
+    networks:
+      - data-platform
+
+##########################################################
+  # ⚡ SPARK FIXED COMPLETELY
+  ##########################################################
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    hostname: spark-master
+    user: "0:0"
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_DRIVER_CLASSPATH=/opt/spark/extra-jars/*
+      - SPARK_EXECUTOR_CLASSPATH=/opt/spark/extra-jars/*
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+    ports:
+      - "8084:8080"   # YOUR PORT - Spark UI
+      - "7077:7077"   # YOUR PORT - Master
+    volumes:
+      - ./apps:/opt/spark-apps
+      - ./data:/opt/spark-data
+      - ./spark-events:/opt/spark-events
+      - spark-home:/home/spark
+      - ./shared:/opt/shared-data
+      - ./spark-conf:/opt/spark/conf
+      - ./spark-jars:/opt/spark/extra-jars
+    command: >
+      /bin/bash -c "
+      mkdir -p /home/spark/.ivy2 &&
+      chmod -R 777 /home/spark &&
+      /opt/spark/sbin/start-master.sh &&
+      tail -f /dev/null
+      "
+    networks:
+      - data-platform
+
+  spark-worker-1:
+    image: apache/spark:3.5.0
+    container_name: spark-worker-1
+    hostname: spark-worker
+    user: "0:0"
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=4G
+      - SPARK_WORKER_CORES=1
+      - SPARK_EXECUTOR_CLASSPATH=/opt/spark/extra-jars/*
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+    ports:
+      - "8086:8081"   # YOUR PORT - Worker UI
+    volumes:
+      - ./apps:/opt/spark-apps
+      - ./data:/opt/spark-data
+      - ./spark-events:/opt/spark-events
+      - spark-home:/home/spark
+      - ./shared:/opt/shared-data
+      - ./spark-conf:/opt/spark/conf
+      - ./spark-jars:/opt/spark/extra-jars
+    command: >
+      /bin/bash -c "
+      mkdir -p /home/spark/.ivy2 &&
+      chmod -R 777 /home/spark &&
+      /opt/spark/sbin/start-worker.sh spark://spark-master:7077 &&
+      tail -f /dev/null
+      "
+    networks:
+      - data-platform
+
+#########################################################
+    ########################################################
+  nessie-postgres:
+    image: postgres:16-alpine
+    container_name: nessie-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nessie
+      POSTGRES_USER: nessie
+      POSTGRES_PASSWORD: nessie123
+    volumes:
+      - nessie_pgdata:/var/lib/postgresql/data
+    networks:
+      - data-platform
+  nessie:
+   image: projectnessie/nessie:latest
+   container_name: nessie
+   restart: unless-stopped
+   ports:
+     - "19120:19120"
+   environment:
+    # HTTP
+     NESSIE_SERVER_PORT: 19120
+
+    # VERSION STORE → POSTGRES
+     NESSIE_VERSION_STORE_TYPE: JDBC
+     QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://nessie-postgres:5432/nessie
+     QUARKUS_DATASOURCE_USERNAME: nessie
+     QUARKUS_DATASOURCE_PASSWORD: nessie123
+
+    # DEFAULT BRANCH
+     NESSIE_DEFAULT_BRANCH: main
+
+    # LOGGING (optional but helpful)
+     QUARKUS_LOG_LEVEL: INFO
+
+   depends_on:
+     - nessie-postgres
+   networks:
+     - data-platform
+
+##########################################################
+# 🚀 TRINO — SQL Query Engine
+##########################################################
+  trino:
+    image: trinodb/trino:latest
+    container_name: trino
+    depends_on:
+      - minio
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog
+    networks:
+      - data-platform
+  ##########################################################
+  # 🧰 MINIO CLIENT — Bucket & Policy Bootstrap
+  ##########################################################
+  mc:
+    image: minio/mc
+    container_name: mc
+    depends_on:
+      - minio
+    networks:
+      - data-platform
+    environment:
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      AWS_REGION: us-east-1
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minio minio123; do
+        echo '⏳ waiting for MinIO...';
+        sleep 2;
+      done;
+
+      mc mb local/lakehouse --ignore-existing;
+      mc ilm add local/lakehouse --expire-delete-after-days 7;
+
+      echo '✅ MinIO bucket lakehouse is ready';
+      tail -f /dev/null
+      "
+
+  ##########################################################
+  # 📊 SUPERSET FIXED
+  ##########################################################
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    container_name: superset
+    ports:
+      - "8088:8088"
+    environment:
+      - SUPERSET_SECRET_KEY=superset
+    volumes:
+      - ./superset:/app/superset_home
+    networks:
+      - data-platform
+    restart: unless-stopped
+    depends_on:
+      - trino
+
+##########################################################
+# 🌐 GLOBAL NETWORKS (ONLY ONE ALLOWED)
+##########################################################
+networks:
+  data-platform:
+    driver: bridge
+
+##########################################################
+# 📦 GLOBAL VOLUMES
+##########################################################
+volumes:
+  nifi_data:
+  spark-home:
+  nessie_pgdata:
+

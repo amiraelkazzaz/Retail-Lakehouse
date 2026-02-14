@@ -1,0 +1,40 @@
+#################################################
+# Lakehouse Runtime & Big Data
+#################################################
+data/
+warehouse/
+spark-events/
+polaris-logs/
+
+#################################################
+# Nifi runtime
+#################################################
+nifi_content_repository/
+nifi_database_repository/
+nifi_flowfile_repository/
+nifi_provenance_repository/
+nifi_state/
+nifi_backup.tar
+recovered_flow.json.gz
+nifi-conf-backup/
+nifi-conf-restore/
+nifi-old-data-backup/
+nifi-recovery-attempt/
+old_nifi_extract/
+#################################################
+# Python
+#################################################
+__pycache__/
+*.pyc
+.venv/
+
+#################################################
+# OS
+#################################################
+.DS_Store
+Thumbs.db
+
+#################################################
+# Secrets
+#################################################
+.env
